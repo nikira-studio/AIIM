@@ -5,7 +5,9 @@
 - Limited saved and imported file portraits to AIIM's managed portrait directory, and rejected network file paths.
 - Kept older HTTP compatible-provider records and their chats during restore, but disabled those providers until they use HTTPS or a loopback address.
 - Saved credential changes before provider changes, so a failed credential update cannot restore a key for a changed endpoint.
+- Bound every saved credential to its provider type and normalized address, so a failed provider save cannot send a new key to an older address after restart. Existing unbound keys are safely discarded once and can be re-entered in Preferences.
 - Stopped keyless provider removal from requiring Windows credential encryption.
+- Added ChatGPT Disconnect / switch account, which removes the saved refresh token and clears the active session. Removing a ChatGPT subscription provider now disconnects it too.
 - Added a Windows CI workflow for install, audit, test, and build checks.
 
 ## 1.0.0 RC6

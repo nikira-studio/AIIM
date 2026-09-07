@@ -19,6 +19,7 @@ const api: DesktopApi = {
   clearConversation: (id: ConversationId) => ipcRenderer.invoke("conversation:clear", id),
   subscriptionStatus: () => ipcRenderer.invoke("subscription:status"),
   connectSubscription: () => ipcRenderer.invoke("subscription:connect"),
+  disconnectSubscription: () => ipcRenderer.invoke("subscription:disconnect"),
   choosePortrait: () => ipcRenderer.invoke("portrait:choose"),
   exportConversation: (id?: ConversationId) => ipcRenderer.invoke("history:export", id),
   clearAllHistory: () => ipcRenderer.invoke("history:clear-all"),

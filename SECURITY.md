@@ -9,9 +9,10 @@ AIIM uses [GitHub private vulnerability reporting](https://github.com/nikira-stu
 - Renderer windows use Electron context isolation, sandboxing, and no Node.js integration.
 - Renderer navigation and pop-up windows are restricted.
 - A content security policy blocks injected scripts and embedded objects.
-- Windows credential encryption protects saved provider secrets.
+- Windows credential encryption protects saved provider secrets. Each key is bound to its provider type and normalized address before AIIM will use it.
 - Character files have path, file-type, and size checks.
-- Portable backups exclude credentials. Existing keys are removed before a changed provider type or address is saved.
+- Portable backups exclude credentials. Existing keys are removed before a changed provider type or address is saved. Older unbound key records are discarded during the security migration rather than guessed at.
+- ChatGPT subscription tokens can be removed directly from Preferences with **Disconnect / switch account**.
 - Restored portraits can only refer to AIIM-managed local portrait files. Network and arbitrary local file URLs are ignored.
 
 AIIM does not treat imported character files as code and character files cannot grant provider or tool access.

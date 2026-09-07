@@ -3,7 +3,7 @@ const path = require("node:path");
 const electronPath = require("electron");
 
 const marker = "AIIM Electron smoke test passed:";
-const child = spawn(electronPath, [path.join(__dirname, "ui-smoke.cjs")], {
+const child = spawn(electronPath, ["--disable-gpu", path.join(__dirname, "ui-smoke.cjs")], {
   cwd: path.resolve(__dirname, ".."),
   stdio: ["ignore", "pipe", "pipe"],
 });

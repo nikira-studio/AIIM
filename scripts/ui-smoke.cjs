@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, "..");
 const packageJson = require(path.join(root, "package.json"));
 const dataDirectory = mkdtempSync(path.join(os.tmpdir(), "aiim-ui-smoke-"));
 const logFile = path.join(dataDirectory, "smoke.log");
+app.disableHardwareAcceleration();
 writeFileSync(logFile, "smoke process started\n");
 process.env.AIIM_DATA_DIRECTORY = dataDirectory;
 process.env.AIIM_UI_SMOKE = "1";

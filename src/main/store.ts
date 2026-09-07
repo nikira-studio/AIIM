@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { safeStorage } from "electron";
-import type { AppSnapshot, Buddy, BuddyId, BuddyInput, ChatMessage, CheckInFrequency, Conversation, ConversationId, MemoryId, ProfileStatus, ProviderConfig, ProviderId, ProviderInput, UserProfileInput } from "../shared/types";
+import type { AppSnapshot, Buddy, BuddyId, BuddyInput, ChatMessage, CheckInFrequency, Conversation, ConversationId, MemoryId, ProfileStatus, ProviderConfig, ProviderId, ProviderInput, ProviderKind, UserProfileInput } from "../shared/types";
 import { nextCheckInDate } from "../shared/check-ins";
 import { buddyPresence } from "../shared/presence";
 import { parseStoredSnapshot } from "./validation";
 
 interface StoredDocument { version: 1; snapshot: AppSnapshot; }
-type SecretMap = Record<string, string>;
+interface CredentialBinding { kind: ProviderKind; baseUrl: string; }
+interface StoredCredential extends CredentialBinding { value: string; }
+type SecretMap = Record<string, StoredCredential>;
 
 export class AppStore {
   private snapshotValue: AppSnapshot = emptySnapshot();
@@ -21,7 +23,7 @@ export class AppStore {
     await fs.mkdir(this.directory, { recursive: true });
     this.snapshotValue = await this.readSnapshot();
     this.secrets = await this.readSecrets();
-    this.syncKeyFlags();
+    syncKeyFlags(this.snapshotValue, this.secrets);
   }
 
   snapshot(): AppSnapshot { return structuredClone(this.snapshotValue); }
@@ -42,11 +44,11 @@ export class AppStore {
         delete nextSecrets[id];
       }
     }
+    syncKeyFlags(nextSnapshot, nextSecrets);
     if (!sameSecrets(this.secrets, nextSecrets)) await this.writeSecrets(nextSecrets);
+    await this.persist(nextSnapshot);
     this.secrets = nextSecrets;
     this.snapshotValue = nextSnapshot;
-    this.syncKeyFlags();
-    await this.persist();
     return this.snapshot();
   }
 
@@ -58,22 +60,24 @@ export class AppStore {
       kind: input.kind,
       name: input.name,
       ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
-      hasApiKey: input.kind !== "ollama" && input.kind !== "openai-subscription" && Boolean(input.apiKey || this.secrets[id]),
+      hasApiKey: false,
     };
     const nextSecrets = { ...this.secrets };
     if (current && !sameCredentialTarget(current, provider) && !input.apiKey) {
       delete nextSecrets[id];
     }
     if (input.apiKey) {
-      nextSecrets[id] = input.apiKey;
+      nextSecrets[id] = { ...credentialBinding(provider), value: input.apiKey };
     }
+    const nextSnapshot = structuredClone(this.snapshotValue);
+    nextSnapshot.providers = current
+      ? nextSnapshot.providers.map((item) => item.id === id ? provider : item)
+      : [...nextSnapshot.providers, provider];
+    syncKeyFlags(nextSnapshot, nextSecrets);
     if (!sameSecrets(this.secrets, nextSecrets)) await this.writeSecrets(nextSecrets);
+    await this.persist(nextSnapshot);
     this.secrets = nextSecrets;
-    this.snapshotValue.providers = current
-      ? this.snapshotValue.providers.map((item) => item.id === id ? provider : item)
-      : [...this.snapshotValue.providers, provider];
-    this.syncKeyFlags();
-    await this.persist();
+    this.snapshotValue = nextSnapshot;
     return this.snapshot();
   }
 
@@ -81,14 +85,19 @@ export class AppStore {
     if (this.snapshotValue.buddies.some((buddy) => buddy.providerId === id)) throw new Error("Remove or edit this provider's buddies first.");
     const nextSecrets = { ...this.secrets };
     delete nextSecrets[id];
+    const nextSnapshot = structuredClone(this.snapshotValue);
+    nextSnapshot.providers = nextSnapshot.providers.filter((provider) => provider.id !== id);
     if (!sameSecrets(this.secrets, nextSecrets)) await this.writeSecrets(nextSecrets);
+    await this.persist(nextSnapshot);
     this.secrets = nextSecrets;
-    this.snapshotValue.providers = this.snapshotValue.providers.filter((provider) => provider.id !== id);
-    await this.persist();
+    this.snapshotValue = nextSnapshot;
     return this.snapshot();
   }
 
-  apiKey(id: ProviderId): string | undefined { return this.secrets[id]; }
+  apiKey(id: ProviderId): string | undefined {
+    const provider = this.snapshotValue.providers.find((item) => item.id === id);
+    return provider ? credentialValue(this.secrets[id], provider) : undefined;
+  }
 
   async saveBuddy(input: BuddyInput): Promise<AppSnapshot> {
     if (!this.snapshotValue.providers.some((provider) => provider.id === input.providerId)) throw new Error("That provider no longer exists.");
@@ -276,24 +285,21 @@ export class AppStore {
       const encrypted = await fs.readFile(path.join(this.directory, "credentials.bin"));
       if (!safeStorage.isEncryptionAvailable()) return {};
       const raw: unknown = JSON.parse(safeStorage.decryptString(encrypted));
-      return typeof raw === "object" && raw !== null ? raw as SecretMap : {};
+      const parsed = parseStoredSecrets(raw);
+      if (parsed.legacyCredentialsDiscarded) {
+        this.startupNoticeValue = "AIIM signed out saved API keys to complete a security upgrade. Re-enter keys for providers you still use.";
+      }
+      return parsed.secrets;
     } catch (error) {
       if (!isMissingFile(error)) return {};
       return {};
     }
   }
 
-  private syncKeyFlags(): void {
-    this.snapshotValue.providers = this.snapshotValue.providers.map((provider) => ({
-      ...provider,
-      hasApiKey: provider.kind !== "ollama" && provider.kind !== "openai-subscription" && Boolean(this.secrets[provider.id]),
-    }));
-  }
-
-  private async persist(): Promise<void> {
+  private async persist(snapshot = this.snapshotValue): Promise<void> {
     const target = path.join(this.directory, "chats.json");
     const backup = path.join(this.directory, "chats.backup.json");
-    const serialized = JSON.stringify({ version: 1, snapshot: this.snapshotValue } satisfies StoredDocument, null, 2);
+    const serialized = JSON.stringify({ version: 1, snapshot } satisfies StoredDocument, null, 2);
     const operation = this.persistQueue.catch(() => undefined).then(async () => {
       const temporary = path.join(this.directory, `chats.${randomUUID()}.tmp`);
       const file = await fs.open(temporary, "wx");
@@ -322,13 +328,48 @@ export class AppStore {
   }
 }
 
+function credentialBinding(provider: Pick<ProviderConfig, "kind" | "baseUrl">): CredentialBinding {
+  return { kind: provider.kind, baseUrl: provider.baseUrl ?? "" };
+}
+
 function sameCredentialTarget(left: Pick<ProviderConfig, "kind" | "baseUrl">, right: Pick<ProviderConfig, "kind" | "baseUrl">): boolean {
-  return left.kind === right.kind && (left.baseUrl ?? "") === (right.baseUrl ?? "");
+  const leftBinding = credentialBinding(left);
+  const rightBinding = credentialBinding(right);
+  return leftBinding.kind === rightBinding.kind && leftBinding.baseUrl === rightBinding.baseUrl;
 }
 
 function sameSecrets(left: SecretMap, right: SecretMap): boolean {
   const leftEntries = Object.entries(left);
-  return leftEntries.length === Object.keys(right).length && leftEntries.every(([id, value]) => right[id] === value);
+  return leftEntries.length === Object.keys(right).length && leftEntries.every(([id, value]) => {
+    const next = right[id];
+    return next?.value === value.value && next.kind === value.kind && next.baseUrl === value.baseUrl;
+  });
+}
+
+function credentialValue(credential: StoredCredential | undefined, provider: ProviderConfig): string | undefined {
+  if (!credential || provider.kind === "ollama" || provider.kind === "openai-subscription") return undefined;
+  const binding = credentialBinding(provider);
+  return credential.kind === binding.kind && credential.baseUrl === binding.baseUrl ? credential.value : undefined;
+}
+
+function syncKeyFlags(snapshot: AppSnapshot, secrets: SecretMap): void {
+  snapshot.providers = snapshot.providers.map((provider) => ({ ...provider, hasApiKey: Boolean(credentialValue(secrets[provider.id], provider)) }));
+}
+
+function parseStoredSecrets(value: unknown): { secrets: SecretMap; legacyCredentialsDiscarded: boolean } {
+  if (!isRecord(value)) return { secrets: {}, legacyCredentialsDiscarded: false };
+  let legacyCredentialsDiscarded = false;
+  const secrets: SecretMap = {};
+  for (const [id, candidate] of Object.entries(value)) {
+    if (typeof candidate === "string") { legacyCredentialsDiscarded = true; continue; }
+    if (!isRecord(candidate) || typeof candidate.value !== "string" || !isProviderKind(candidate.kind) || typeof candidate.baseUrl !== "string") continue;
+    secrets[id] = { value: candidate.value, kind: candidate.kind, baseUrl: candidate.baseUrl };
+  }
+  return { secrets, legacyCredentialsDiscarded };
+}
+
+function isProviderKind(value: unknown): value is ProviderKind {
+  return value === "openai" || value === "openai-subscription" || value === "anthropic" || value === "google" || value === "minimax" || value === "ollama" || value === "openrouter" || value === "openai-compatible";
 }
 
 function emptySnapshot(): AppSnapshot {

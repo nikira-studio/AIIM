@@ -190,6 +190,7 @@ export interface DesktopApi {
   clearConversation(id: ConversationId): Promise<AppSnapshot>;
   subscriptionStatus(): Promise<SubscriptionStatus>;
   connectSubscription(): Promise<SubscriptionStatus>;
+  disconnectSubscription(): Promise<SubscriptionStatus>;
   choosePortrait(): Promise<string | undefined>;
   exportConversation(id?: ConversationId): Promise<boolean>;
   clearAllHistory(): Promise<AppSnapshot>;

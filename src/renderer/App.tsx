@@ -280,6 +280,13 @@ function ProviderSettings({ providers, reportError }: { providers: ProviderConfi
     catch (reason) { reportError(messageOf(reason)); }
     finally { setConnecting(false); }
   };
+  const disconnect = async () => {
+    if (!window.confirm("Disconnect this ChatGPT account from AIIM?")) return;
+    setConnecting(true);
+    try { setSubscription(await window.aiMessenger.disconnectSubscription()); }
+    catch (reason) { reportError(messageOf(reason)); }
+    finally { setConnecting(false); }
+  };
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -314,7 +321,9 @@ function ProviderSettings({ providers, reportError }: { providers: ProviderConfi
           {kind === "openai-subscription" ? <div className={`subscription-card ${subscription.kind}`}>
             <div><strong>{subscription.kind === "signed-in" ? `Connected to ${subscription.plan}` : subscription.kind === "unavailable" ? "Sign-in unavailable" : "ChatGPT sign-in required"}</strong>
             <small>{subscription.kind === "signed-in" ? subscription.email ?? "Subscription connected" : subscription.kind === "unavailable" ? subscription.message : "Experimental connection. Opens OpenAI in your browser and uses your included ChatGPT plan usage. No Codex install needed."}</small></div>
-            {subscription.kind !== "signed-in" && <button type="button" disabled={connecting || subscription.kind === "unavailable"} onClick={() => void connect()}>{connecting ? "Waiting for sign-in..." : "Connect ChatGPT"}</button>}
+            {subscription.kind === "signed-in"
+              ? <button type="button" disabled={connecting} onClick={() => void disconnect()}>Disconnect / switch account</button>
+              : <button type="button" disabled={connecting || subscription.kind === "unavailable"} onClick={() => void connect()}>{connecting ? "Waiting for sign-in..." : "Connect ChatGPT"}</button>}
           </div> : kind === "ollama" ? <div className="notice success">Ollama runs on this computer and does not need an API key.</div> : <label>API key<input name="apiKey" type="password" placeholder={editing?.hasApiKey ? "Leave blank to keep saved key" : "Paste API key"} /></label>}
           {(kind === "ollama" || kind === "openai-compatible" || editing?.baseUrl) && <label>Base URL<input name="baseUrl" defaultValue={editing?.baseUrl ?? (kind === "ollama" ? "http://localhost:11434" : "")} placeholder={kind === "ollama" ? "http://localhost:11434" : "http://localhost:1234/v1"} />{kind === "ollama" && <small>The standard local address is already filled in. Change it only if Ollama runs elsewhere.</small>}</label>}
         </div>

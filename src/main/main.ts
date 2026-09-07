@@ -156,7 +156,15 @@ function registerIpc(): void {
     broadcastSnapshot();
     return snapshot;
   });
-  handleIpc("provider:remove", async (_event, id: ProviderId) => { const snapshot = await store.removeProvider(id); modelCache.delete(id); broadcastSnapshot(); return snapshot; });
+  handleIpc("provider:remove", async (_event, id: ProviderId) => {
+    const provider = store.provider(id);
+    if (store.snapshot().buddies.some((buddy) => buddy.providerId === id)) throw new Error("Remove or edit this provider's buddies first.");
+    if (provider.kind === "openai-subscription") await subscription.disconnect();
+    const snapshot = await store.removeProvider(id);
+    modelCache.delete(id);
+    broadcastSnapshot();
+    return snapshot;
+  });
   handleIpc("provider:models", async (_event, id: ProviderId, refresh = false) => {
     const cached = modelCache.get(id);
     if (cached && !refresh) return cached;
@@ -225,6 +233,7 @@ function registerIpc(): void {
   });
   handleIpc("subscription:status", () => subscription.status());
   handleIpc("subscription:connect", () => subscription.connect((url) => shell.openExternal(url)));
+  handleIpc("subscription:disconnect", () => subscription.disconnect());
   handleIpc("portrait:choose", async () => {
     const result = await dialog.showOpenDialog({ title: "Choose a buddy picture", properties: ["openFile"], filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }] });
     if (result.canceled || !result.filePaths[0]) return undefined;

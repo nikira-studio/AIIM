@@ -55,6 +55,7 @@ interface StreamInput {
 export class OpenAiSubscriptionClient {
   private tokens?: StoredTokens;
   private refreshPromise?: Promise<StoredTokens>;
+  private sessionEpoch = 0;
   private readonly tokenPath: string;
 
   constructor(private readonly directory: string) {
@@ -121,6 +122,14 @@ export class OpenAiSubscriptionClient {
     }
   }
 
+  async disconnect(): Promise<SubscriptionStatus> {
+    this.sessionEpoch += 1;
+    await fs.rm(this.tokenPath, { force: true });
+    this.tokens = undefined;
+    this.refreshPromise = undefined;
+    return this.status();
+  }
+
   async stream(input: StreamInput): Promise<void> {
     const tokens = await this.validTokens();
     const visible = createVisibleTextFilter(input.onDelta, input.onMemory);
@@ -176,17 +185,18 @@ export class OpenAiSubscriptionClient {
   private async validTokens(): Promise<StoredTokens> {
     if (!this.tokens) throw new Error("Connect your ChatGPT subscription in Preferences first.");
     if (this.tokens.expiresAt > Date.now() + 30_000) return this.tokens;
-    this.refreshPromise ??= this.refresh(this.tokens).finally(() => { this.refreshPromise = undefined; });
+    this.refreshPromise ??= this.refresh(this.tokens, this.sessionEpoch).finally(() => { this.refreshPromise = undefined; });
     return this.refreshPromise;
   }
 
-  private async refresh(current: StoredTokens): Promise<StoredTokens> {
+  private async refresh(current: StoredTokens, epoch: number): Promise<StoredTokens> {
     const response = await fetch(`${issuer}/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: clientId }),
     });
     const refreshed = await readTokenResponse(response, "ChatGPT session refresh");
+    if (epoch !== this.sessionEpoch) throw new Error("The ChatGPT session was disconnected.");
     this.tokens = toStoredTokens(refreshed, current);
     await this.save();
     return this.tokens;

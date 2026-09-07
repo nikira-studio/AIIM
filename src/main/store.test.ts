@@ -202,6 +202,43 @@ describe("Windows chat persistence", () => {
     expect(store.apiKey(provider.id)).toBe("secret");
   });
 
+  it("never uses a newly saved key with the old endpoint after a provider write fails", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aiim-store-"));
+    temporaryDirectories.push(directory);
+    const store = new AppStore(directory);
+    await store.load();
+    const saved = await store.saveProvider({ kind: "openai-compatible", name: "Hosted", baseUrl: "https://first.example/v1", apiKey: "first-key" });
+    const provider = saved.providers[0];
+    if (!provider) throw new Error("Test provider was not saved.");
+
+    const writeFailure = Object.assign(new Error("Disk failure"), { code: "EIO" });
+    const rename = vi.spyOn(fs, "rename").mockRejectedValueOnce(writeFailure);
+    await expect(store.saveProvider({ id: provider.id, kind: "openai-compatible", name: "Hosted", baseUrl: "https://second.example/v1", apiKey: "second-key" })).rejects.toThrow("Disk failure");
+    rename.mockRestore();
+
+    const restarted = new AppStore(directory);
+    await restarted.load();
+    expect(restarted.snapshot().providers[0]).toMatchObject({ baseUrl: "https://first.example/v1", hasApiKey: false });
+    expect(restarted.apiKey(provider.id)).toBeUndefined();
+  });
+
+  it("does not trust credentials saved before binding was introduced", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aiim-store-"));
+    temporaryDirectories.push(directory);
+    const store = new AppStore(directory);
+    await store.load();
+    const saved = await store.saveProvider({ kind: "openai-compatible", name: "Hosted", baseUrl: "https://models.example/v1" });
+    const provider = saved.providers[0];
+    if (!provider) throw new Error("Test provider was not saved.");
+    await fs.writeFile(path.join(directory, "credentials.bin"), Buffer.from(JSON.stringify({ [provider.id]: "unbound-key" }), "utf8"));
+
+    const restarted = new AppStore(directory);
+    await restarted.load();
+    expect(restarted.apiKey(provider.id)).toBeUndefined();
+    expect(restarted.snapshot().providers[0]?.hasApiKey).toBe(false);
+    expect(restarted.takeStartupNotice()).toContain("security upgrade");
+  });
+
   it("removes only the trailing failed reply before retrying", async () => {
     const { store } = await testStore();
     const buddy = store.snapshot().buddies[0];
