@@ -9,13 +9,13 @@ for (const directory of ["dist", "dist-electron"]) {
 }
 
 async function removeBuildDirectory(target) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
       await rm(target, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 });
       return;
     } catch (error) {
-      if (attempt === 4 || !isRetryableWindowsLock(error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      if (attempt === 11 || !isRetryableWindowsLock(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
     }
   }
 }

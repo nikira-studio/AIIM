@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 RC7
+## 1.0.0
 
 - Limited saved and imported file portraits to AIIM's managed portrait directory, and rejected network file paths.
 - Kept older HTTP compatible-provider records and their chats during restore, but disabled those providers until they use HTTPS or a loopback address.

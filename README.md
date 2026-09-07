@@ -8,7 +8,7 @@ AIIM is an open-source hobby project from [Nikira Studio](https://nikira.com), r
 
 ![AIIM buddy list, chat windows, and provider settings](docs/images/aiim-overview.png)
 
-*This preview was captured during RC4. See the [changelog](CHANGELOG.md) for RC7 fixes.*
+*The screenshot shows AIIM in action. See the [changelog](CHANGELOG.md) for the 1.0 release notes.*
 
 ## What works
 
