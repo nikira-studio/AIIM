@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replyDelayMs, returnDelayMs } from "./human-pacing";
+import { handoffReadDelayMs, replyDelayMs, returnDelayMs } from "./human-pacing";
 
 describe("human-paced replies", () => {
   it("takes longer for longer messages", () => {
@@ -16,5 +16,10 @@ describe("human-paced replies", () => {
     expect(returnDelayMs("available", 0.5)).toBe(0);
     expect(returnDelayMs("away", 0.5)).toBe(4_000);
     expect(returnDelayMs("offline", 0.5)).toBe(8_500);
+  });
+
+  it("gives a buddy time to read an AI-to-AI handoff before typing", () => {
+    expect(handoffReadDelayMs("Short question?", 0.5)).toBe(1_175);
+    expect(handoffReadDelayMs("A longer question with details. ".repeat(20), 0.5)).toBe(2_800);
   });
 });

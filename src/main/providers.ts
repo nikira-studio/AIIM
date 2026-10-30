@@ -4,6 +4,9 @@ import { readSseData } from "../shared/sse";
 
 interface CompletionRequest { provider: ProviderConfig; apiKey?: string; buddy: Buddy; profile: UserProfile; messages: ChatMessage[]; signal: AbortSignal; instructionsOverride?: string; }
 interface WireMessage { role: string; content: string; }
+export interface ProviderToolSpec { name: string; description?: string; inputSchema: Record<string, unknown>; }
+export type OpenAiToolTurn = { kind: "final"; text: string } | { kind: "tool"; id: string; name: string; argumentsValue: unknown; assistantMessage: Record<string, unknown> } | { kind: "multiple-tools" } | { kind: "tools-unsupported" };
+type PreviousToolResult = { assistantMessage: Record<string, unknown>; callId: string; toolName: string; argumentsJson: string; result: string };
 
 export async function streamCompletion(request: CompletionRequest, onDelta: (text: string) => void, onMemory?: (text: string) => void): Promise<void> {
   if (request.provider.kind !== "ollama" && !request.apiKey) throw new Error(`Add an API key for ${request.provider.name} in Preferences.`);
@@ -23,6 +26,97 @@ export async function streamCompletion(request: CompletionRequest, onDelta: (tex
     }
   }
   visible.finish();
+}
+
+/**
+ * The OpenAI Chat Completions tool envelope is also used by MiniMax, OpenRouter,
+ * and many self-hosted "OpenAI-compatible" servers.  Keep this boundary explicit:
+ * native Anthropic, Gemini, and Ollama tool protocols get their own adapters rather
+ * than being treated as a vaguely compatible variation of this one.
+ */
+export function supportsOpenAiStyleTools(kind: ProviderConfig["kind"]): boolean {
+  return kind === "openai" || kind === "minimax" || kind === "openrouter" || kind === "openai-compatible";
+}
+
+export function supportsProviderTools(kind: ProviderConfig["kind"]): boolean {
+  return kind === "ollama" || supportsOpenAiStyleTools(kind);
+}
+
+export async function providerToolTurn(request: CompletionRequest, tools: ProviderToolSpec[], previousToolResult?: PreviousToolResult): Promise<OpenAiToolTurn> {
+  return request.provider.kind === "ollama" ? ollamaToolTurn(request, tools, previousToolResult) : openAiToolTurn(request, tools, previousToolResult);
+}
+
+async function ollamaToolTurn(request: CompletionRequest, tools: ProviderToolSpec[], previousToolResult?: PreviousToolResult): Promise<OpenAiToolTurn> {
+  const messages: Array<Record<string, unknown>> = wireMessages(request).map((message) => ({ ...message }));
+  if (previousToolResult) messages.push(previousToolResult.assistantMessage, { role: "tool", tool_name: previousToolResult.toolName, content: previousToolResult.result });
+  const baseUrl = request.provider.baseUrl ?? "http://localhost:11434";
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json" }, signal: request.signal,
+    body: JSON.stringify({ model: request.buddy.modelId, stream: false, think: false, messages, ...(previousToolResult ? {} : { tools: tools.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description ?? "", parameters: tool.inputSchema } })) }) }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    if (!previousToolResult && response.status === 400 && /does not support tools/i.test(body)) return { kind: "tools-unsupported" };
+    throw new Error(`Ollama returned ${response.status}${body ? `: ${body.slice(0, 500)}` : ""}`);
+  }
+  const payload: unknown = await response.json();
+  if (!isRecord(payload) || !isRecord(payload.message)) throw new Error("Ollama returned an empty response.");
+  const message = payload.message;
+  const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  if (calls.length > 1) return { kind: "multiple-tools" };
+  if (calls.length === 1) {
+    const call = calls[0];
+    if (!isRecord(call) || !isRecord(call.function) || typeof call.function.name !== "string" || !isRecord(call.function.arguments)) throw new Error("Ollama returned an invalid tool request.");
+    return { kind: "tool", id: "ollama-tool", name: call.function.name, argumentsValue: call.function.arguments, assistantMessage: message };
+  }
+  return { kind: "final", text: filterVisibleText(typeof message.content === "string" ? message.content : "") };
+}
+
+export async function openAiToolTurn(request: CompletionRequest, tools: ProviderToolSpec[], previousToolResult?: PreviousToolResult): Promise<OpenAiToolTurn> {
+  if (!supportsOpenAiStyleTools(request.provider.kind)) throw new Error("This provider does not support AIIM capabilities yet.");
+  if (!request.apiKey) throw new Error(`Add an API key for ${request.provider.name} in Preferences.`);
+  const messages: Array<Record<string, unknown>> = wireMessages(request).map((message) => ({ ...message }));
+  if (previousToolResult) {
+    // MiniMax requires the complete first assistant response for a tool-result turn, including any private reasoning it supplied.
+    messages.push(previousToolResult.assistantMessage);
+    messages.push({ role: "tool", tool_call_id: previousToolResult.callId, content: previousToolResult.result });
+  }
+  const response = await fetch(openAiStyleToolEndpoint(request.provider), {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${request.apiKey}` },
+    body: JSON.stringify({ model: request.buddy.modelId, stream: false, messages, ...(previousToolResult ? {} : { tools: tools.map((tool) => ({ type: "function", function: { name: tool.name, ...(tool.description ? { description: tool.description } : {}), parameters: tool.inputSchema } })), tool_choice: "auto" }), ...(request.provider.kind === "openai" ? { reasoning_effort: request.buddy.reasoningEffort } : {}) }),
+    signal: request.signal,
+  });
+  await assertOk(response);
+  const payload: unknown = await response.json();
+  const message = openAiResponseMessage(payload);
+  if (!message) throw new Error("The provider returned an empty response.");
+  const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  if (calls.length > 1) return { kind: "multiple-tools" };
+  if (calls.length === 1) {
+    const call = calls[0];
+    if (!isRecord(call)) throw new Error("The provider returned an invalid tool request.");
+    const functionValue = isRecord(call.function) ? call.function : undefined;
+    if (typeof call.id !== "string" || !functionValue || typeof functionValue.name !== "string" || typeof functionValue.arguments !== "string") throw new Error("The provider returned an invalid tool request.");
+    let argumentsValue: unknown;
+    try { argumentsValue = JSON.parse(functionValue.arguments); } catch { throw new Error("The provider returned invalid tool arguments."); }
+    return { kind: "tool", id: call.id, name: functionValue.name, argumentsValue, assistantMessage: message };
+  }
+  return { kind: "final", text: filterVisibleText(typeof message.content === "string" ? message.content : "") };
+}
+
+export function openAiStyleToolEndpoint(provider: ProviderConfig): string {
+  const baseUrl = provider.baseUrl ?? (provider.kind === "openrouter"
+    ? "https://openrouter.ai/api/v1"
+    : provider.kind === "minimax"
+      ? "https://api.minimax.io/v1"
+      : "https://api.openai.com/v1");
+  return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+}
+
+function openAiResponseMessage(payload: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(payload) || !Array.isArray(payload.choices) || !isRecord(payload.choices[0]) || !isRecord(payload.choices[0].message)) return undefined;
+  return payload.choices[0].message;
 }
 
 async function streamOllama(request: CompletionRequest, onDelta: (text: string) => void): Promise<void> {
@@ -209,4 +303,12 @@ export function createVisibleTextFilter(onText: (text: string) => void, onMemory
     emittedVisible = true;
     onText(text);
   }
+}
+
+export function filterVisibleText(text: string): string {
+  let visibleText = "";
+  const filter = createVisibleTextFilter((chunk) => { visibleText += chunk; });
+  filter.push(text);
+  filter.finish();
+  return visibleText;
 }

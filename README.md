@@ -37,6 +37,7 @@ AIIM is an open-source hobby project from [Nikira Studio](https://nikira.com), r
 - Automatic history recovery, portable data backups, buddy export, and in-app help
 - Notification-area support: closing the buddy list hides AIIM, while Quit stops it completely
 - An uninstaller that offers to erase local data but keeps it by default
+- Optional MCP connected services over secure web or local-program connections, with reviewed per-buddy tools that become trusted after the first explicit approval
 
 ## Run it
 
@@ -49,7 +50,7 @@ Open Preferences, add a provider, save it, and use **Check** to confirm the conn
 
 Ollama normally uses `http://localhost:11434` and does not require an API key. Start Ollama and install at least one chat model before using Check.
 
-For experimental ChatGPT subscription access, choose `OpenAI · ChatGPT subscription` and select `Connect ChatGPT`. AIIM opens OpenAI's browser sign-in and stores the resulting session using Windows credential encryption. Codex does not need to be installed. OpenAI does not document this as a general third-party application connection, so it may change or stop working. The supported OpenAI option for public applications remains the OpenAI API.
+For ChatGPT subscription access, choose `OpenAI · ChatGPT subscription` and select **Connect ChatGPT**. AIIM opens OpenAI's browser sign-in and stores the resulting session using Windows credential encryption. Codex does not need to be installed. This connection depends on ChatGPT's sign-in and service behavior, so a future service change may require an AIIM update.
 
 ## Build the Windows installer
 
@@ -63,9 +64,11 @@ The installer is currently unsigned. Windows may show a SmartScreen warning unti
 
 ## Data and privacy
 
-Chat history is stored in the Electron user-data directory under `data/chats.json`. AIIM writes this file through a temporary file and keeps `chats.backup.json` for automatic recovery. API keys and ChatGPT subscription tokens are kept separately through Electron `safeStorage`, which uses Windows credential encryption.
+Chat history is stored in the Electron user-data directory under `data/chats.json`. AIIM writes this file through a temporary file and keeps `chats.backup.json` for automatic recovery. API keys, ChatGPT subscription tokens, and optional MCP bearer tokens are kept separately through Electron `safeStorage`, which uses Windows credential encryption.
 
 Messages, character instructions, relevant history, profile details, and memories go to the selected provider when it generates a reply. Optional spontaneous check-ins and automatic memory learning can also contact that provider. Memory learning runs after the visible reply and can make a second provider request. Portable AIIM backups do not include API keys or subscription tokens. During restore, a saved API key is kept only when the provider type and service address are unchanged; keys for changed or removed providers are deleted.
+
+Connected services are optional. Their non-secret setup can be backed up; restored services are turned off, and their permissions and tokens must be set again. Character files never contain service information, permissions, or tokens. AIIM offers MCP tool use to tool-capable Ollama models and OpenAI-style API-key buddies: OpenAI, MiniMax, OpenRouter, and compatible services. Each request can be allowed once or trusted for that buddy and exact unchanged tool. Raw tool data never becomes chat history or memory.
 
 Uninstalling AIIM asks whether to remove buddies, chats, memories, settings, and saved credentials. The default answer is No so a later reinstall can pick up where you left off.
 

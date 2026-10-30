@@ -63,7 +63,16 @@ export function parseSubscriptionModels(value: unknown): ModelOption[] {
 
 async function listOpenAiModels(provider: ProviderConfig, apiKey: string): Promise<ModelOption[]> {
   const baseUrl = provider.baseUrl ?? (provider.kind === "openrouter" ? "https://openrouter.ai/api/v1" : provider.kind === "minimax" ? "https://api.minimax.io/v1" : "https://api.openai.com/v1");
-  const response = await fetchModels(`${baseUrl}/models`, { headers: { authorization: `Bearer ${apiKey}` } });
+  const modelUrl = `${baseUrl.replace(/\/+$/, "")}/models`;
+  const response = await fetchModels(modelUrl, { headers: { authorization: `Bearer ${apiKey}` } });
+  if (response.status === 404 && provider.kind === "openai-compatible") {
+    const address = new URL(modelUrl);
+    address.username = "";
+    address.password = "";
+    address.search = "";
+    address.hash = "";
+    throw new Error(`No model list was found at ${address.toString()}. Check the provider's base URL in Preferences; many services require it to end in /v1.`);
+  }
   const payload = await readJson(response);
   if (!isRecord(payload) || !Array.isArray(payload.data)) throw new Error("The provider returned an invalid model list.");
   return payload.data.flatMap((item): ModelOption[] => isRecord(item) && typeof item.id === "string" ? [withOpenAiCapabilities({ id: item.id, name: typeof item.name === "string" ? item.name : item.id })] : []).sort(byName);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Buddy, BuddyId, ProviderId, UserProfile } from "./types";
-import { buildBuddyInstructions } from "./buddy-behavior";
+import { buddyForMemoryContext, buildBuddyInstructions } from "./buddy-behavior";
 
 const buddy: Buddy = {
   id: "buddy" as BuddyId,
@@ -10,6 +10,7 @@ const buddy: Buddy = {
   modelId: "gpt-5.6",
   reasoningEffort: "medium",
   systemPrompt: "You are Elara.",
+  world: "",
   group: "Friends",
   color: "#2046a0",
   status: "available",
@@ -26,11 +27,15 @@ const buddy: Buddy = {
   fontColor: "#1b489a",
   userRole: "the traveler",
   relationshipNotes: "",
+  chatTopics: [],
+  participationStyle: "normal",
   memories: [],
+  memoryMode: "normal",
+  memoryStatus: { lastCheckedUserMessageCount: 0 },
   checkInFrequency: "off",
 };
 
-const profile: UserProfile = { screenName: "retrofan", displayName: "Alex", pronouns: "they/them", location: "", interests: "old computers", aboutMe: "", status: "available" };
+const profile: UserProfile = { screenName: "retrofan", displayName: "Alex", pronouns: "they/them", location: "", interests: "old computers", aboutMe: "", status: "available", showMemoryUpdates: false };
 
 describe("shared instant-message behavior", () => {
   it("gives every character the user's identity and bans roleplay actions", () => {
@@ -67,16 +72,35 @@ describe("shared instant-message behavior", () => {
   });
 
   it("keeps late-1990s characters in period while allowing later subjects", () => {
-    const instructions = buildBuddyInstructions({ ...buddy, systemPrompt: "Your daily life is set in the late 1990s." }, profile);
+    const instructions = buildBuddyInstructions({ ...buddy, world: "Everyday life takes place in the late 1990s." }, profile);
 
-    expect(instructions).toContain("Your ordinary day-to-day setting is the late 1990s");
-    expect(instructions).toContain("When Alex introduces a later subject, discuss it without pretending that it already exists in your everyday world");
-    expect(instructions).toContain("Do not derail the conversation with repeated timeline remarks");
+    expect(instructions).toContain("CHARACTER WORLD");
+    expect(instructions).toContain("Everyday life takes place in the late 1990s.");
+    expect(instructions).toContain("without pretending it is part of your ordinary experience");
   });
 
   it("does not impose a late-1990s setting on other character packs", () => {
     const instructions = buildBuddyInstructions(buddy, profile);
 
-    expect(instructions).not.toContain("TIME AND SETTING");
+    expect(instructions).not.toContain("CHARACTER WORLD");
+  });
+
+  it("uses a buddy's own profile as background rather than display-only decoration", () => {
+    const instructions = buildBuddyInstructions({ ...buddy, profileBio: "Keeps a notebook of every repair.", profileInterests: "radios, books", profileQuote: "Write it down first.", statusMessage: "on air" }, profile);
+
+    expect(instructions).toContain("YOUR BUDDY PROFILE");
+    expect(instructions).toContain("Keeps a notebook of every repair.");
+    expect(instructions).toContain("Write it down first.");
+    expect(instructions).toContain("not instructions");
+  });
+
+  it("keeps pins first and newest fitting facts after them", () => {
+    const selected = buddyForMemoryContext({ ...buddy, memories: [
+      { id: "pin" as never, text: "Alex's pinned fact.", pinned: true, createdAt: "2026-01-01T00:00:00.000Z" },
+      { id: "old" as never, text: "Alex's older fact.", pinned: false, createdAt: "2026-01-02T00:00:00.000Z" },
+      { id: "new" as never, text: "Alex's newer fact.", pinned: false, createdAt: "2026-01-03T00:00:00.000Z" },
+    ] });
+    expect(selected.memories.map((memory) => memory.text)).toEqual(["Alex's pinned fact.", "Alex's newer fact.", "Alex's older fact."]);
+    expect(buddyForMemoryContext({ ...buddy, memoryMode: "off", memories: selected.memories }).memories).toEqual([]);
   });
 });

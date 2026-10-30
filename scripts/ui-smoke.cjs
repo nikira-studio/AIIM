@@ -104,6 +104,45 @@ void app.whenReady().then(async () => {
     assert(composerWorks, "the composer did not accept text after history was cleared");
     log("composer works after clear");
 
+    const roomId = await buddyWindow.webContents.executeJavaScript(`(async () => {
+      const snapshot = await window.aiMessenger.snapshot();
+      const first = snapshot.buddies[0];
+      const secondSnapshot = await window.aiMessenger.saveBuddy({ ...first, id: undefined, screenName: "smokeTwo", displayName: "Smoke Two" });
+      const second = secondSnapshot.buddies.find((buddy) => buddy.screenName === "smokeTwo");
+      await window.aiMessenger.saveBuddy({ ...first, id: undefined, screenName: "smokeThree", displayName: "Smoke Three" });
+      const room = await window.aiMessenger.newBuddyChat([first.id, second.id]);
+      await window.aiMessenger.openConversation(room.id);
+      return room.id;
+    })()`);
+    const buddyChatWindow = await findWindow(`/chat/${roomId}`);
+    await waitForSelector(buddyChatWindow, ".participants-card");
+    const roomIdentityReady = await buddyChatWindow.webContents.executeJavaScript(`document.querySelector(".participants-card")?.innerText.includes("@smokeFriend") && document.querySelector(".participants-card")?.innerText.includes("@smokeTwo")`);
+    assert(roomIdentityReady, "Buddy Chat did not show participant screen names");
+    await buddyChatWindow.webContents.executeJavaScript(`(() => {
+      const box = document.querySelector("textarea.composer");
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+      setter.call(box, "@sm");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    await waitForSelector(buddyChatWindow, ".mention-menu");
+    const mentionChoices = await buddyChatWindow.webContents.executeJavaScript(`document.querySelector(".mention-menu")?.innerText`);
+    assert(mentionChoices.includes("@smokeFriend") && mentionChoices.includes("@smokeTwo"), "Buddy Chat mention suggestions were incomplete");
+    await buddyChatWindow.webContents.executeJavaScript(`document.querySelector("textarea.composer").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))`);
+    await pause(50);
+    await buddyChatWindow.webContents.executeJavaScript(`document.querySelector("textarea.composer").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }))`);
+    await pause(50);
+    const mentionCompletion = await buddyChatWindow.webContents.executeJavaScript(`(() => { const box = document.querySelector("textarea.composer"); return { value: box.value, focused: document.activeElement === box, selectionStart: box.selectionStart, selectionEnd: box.selectionEnd }; })()`);
+    assert(mentionCompletion.value === "@smokeTwo ", "Tab did not complete the highlighted Buddy Chat handle");
+    assert(mentionCompletion.focused && mentionCompletion.selectionStart === mentionCompletion.value.length && mentionCompletion.selectionEnd === mentionCompletion.value.length, "mention completion did not leave the caret after the handle");
+    const inviteOpened = await buddyChatWindow.webContents.executeJavaScript(`(() => { const button = [...document.querySelectorAll(".to-row button")].find((item) => item.textContent?.trim() === "Invite buddy"); button?.click(); return Boolean(button); })()`);
+    assert(inviteOpened, "Buddy Chat invite control was not available");
+    await waitForSelector(buddyChatWindow, '[aria-label="Invite a buddy"] input[type="radio"]');
+    await buddyChatWindow.webContents.executeJavaScript(`(() => { const radio = document.querySelector('[aria-label="Invite a buddy"] input[type="radio"]'); radio.click(); const button = [...document.querySelectorAll('[aria-label="Invite a buddy"] button')].find((item) => item.textContent?.trim() === "Invite"); button.click(); })()`);
+    await pause(250);
+    const invitePersisted = await buddyChatWindow.webContents.executeJavaScript(`document.querySelector(".participants-card")?.innerText.includes("@smokeThree") && document.querySelector(".transcript")?.innerText.includes("Smoke Three joined the Buddy Chat.")`);
+    assert(invitePersisted, "Buddy Chat invite did not update the participants and transcript");
+    log("Buddy Chat participants, mentions, and invite work");
+
     await buddyWindow.webContents.executeJavaScript(`window.aiMessenger.openHelp()`);
     const helpWindow = await findWindow("/help");
     await waitForSelector(helpWindow, ".help-content");
@@ -111,7 +150,7 @@ void app.whenReady().then(async () => {
     assert(helpSections >= 6, "the in-app help did not render");
     log("help rendered");
 
-    console.log("AIIM Electron smoke test passed: live dropdown reconciliation, availability, clear-history composer, and Help.");
+    console.log("AIIM Electron smoke test passed: live dropdown reconciliation, availability, clear-history composer, Buddy Chat UI, and Help.");
     for (const window of BrowserWindow.getAllWindows()) window.destroy();
     app.quit();
   } catch (error) {

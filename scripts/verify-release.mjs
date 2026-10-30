@@ -52,7 +52,7 @@ const ids = new Set();
 const screenNames = new Set();
 for (const file of templateFiles) {
   const template = JSON.parse(readFileSync(path.join(templateDirectory, file), "utf8"));
-  assert(template.schemaVersion === 1, `${file} must use character schema version 1`);
+  assert(template.schemaVersion === 2, `${file} must use the current character schema version 2`);
   for (const field of ["id", "displayName", "screenName", "pack", "group", "systemPrompt"]) assert(typeof template[field] === "string" && template[field].trim(), `${file} is missing ${field}`);
   assert(typeof template.userRole === "string", `${file} has an invalid userRole`);
   const id = template.id.toLowerCase();

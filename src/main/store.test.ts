@@ -51,6 +51,8 @@ async function testStore(): Promise<{ store: AppStore; directory: string }> {
     fontFamily: "Tahoma",
     fontColor: "#1b489a",
     relationshipNotes: "",
+    chatTopics: [],
+    participationStyle: "normal",
     checkInFrequency: "off",
   };
   await store.saveBuddy(buddy);
@@ -67,6 +69,18 @@ describe("Windows chat persistence", () => {
     await store.clearConversation(conversation.id);
     await store.addMessage(conversation.id, { id: "after" as MessageId, role: "user", content: "new", createdAt: new Date().toISOString(), state: "complete" });
     expect(store.conversation(conversation.id).messages.map(({ content }) => content)).toEqual(["new"]);
+    expect(store.conversation(conversation.id).summary).toBeUndefined();
+  });
+
+  it("keeps memory mode and pinned facts across a restart", async () => {
+    const { store, directory } = await testStore();
+    const buddy = store.snapshot().buddies[0];
+    if (!buddy) throw new Error("Test buddy was not saved.");
+    await store.saveBuddyMemories(buddy.id, "detailed", [{ text: "Alex prefers old computers.", pinned: true }]);
+
+    const restarted = new AppStore(directory);
+    await restarted.load();
+    expect(restarted.snapshot().buddies[0]).toMatchObject({ memoryMode: "detailed", memories: [{ text: "Alex prefers old computers.", pinned: true }] });
   });
 
   it("persists an availability change over an existing history file", async () => {
@@ -136,6 +150,26 @@ describe("Windows chat persistence", () => {
     expect(store.snapshot().profile.screenName).toBe("me");
   });
 
+  it("restores MCP services disabled and removes their saved permissions and credentials", async () => {
+    const { store, directory } = await testStore();
+    const saved = await store.saveMcpConnection({ name: "Example service", transport: "streamable-http", endpoint: "https://service.example/mcp", bearerToken: "test-token" });
+    const connection = saved.mcpConnections[0];
+    const buddy = saved.buddies[0];
+    if (!connection || !buddy) throw new Error("Test setup failed.");
+    const tool = { name: "lookup", inputSchema: { type: "object" }, fingerprint: "a".repeat(64) };
+    await store.updateMcpConnectionRuntime(connection.id, { enabled: true, state: "ready", tools: [tool] });
+    await store.setBuddyToolGrant(buddy.id, connection.id, tool.name, true);
+    const backup = store.snapshot();
+    await store.replaceSnapshot(backup);
+    expect(store.snapshot().mcpConnections[0]).toMatchObject({ enabled: false, state: "disabled", hasBearerToken: false });
+    expect(store.snapshot().buddyToolGrants).toEqual([]);
+    expect(store.mcpBearerToken(connection.id)).toBeUndefined();
+    const restarted = new AppStore(directory);
+    await restarted.load();
+    expect(restarted.snapshot().mcpConnections[0]).toMatchObject({ enabled: false, state: "disabled", hasBearerToken: false });
+    expect(restarted.mcpBearerToken(connection.id)).toBeUndefined();
+  });
+
 
   it("deletes a saved key when a restored provider address changes", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aiim-store-"));
@@ -200,6 +234,63 @@ describe("Windows chat persistence", () => {
     await expect(store.replaceSnapshot(replacement)).rejects.toThrow("credential encryption");
     expect(store.snapshot().providers[0]?.id).toBe(provider.id);
     expect(store.apiKey(provider.id)).toBe("secret");
+  });
+
+  it("keeps a Buddy Chat separate and restores its participants", async () => {
+    const { store, directory } = await testStore();
+    const buddy = store.snapshot().buddies[0];
+    if (!buddy) throw new Error("Test buddy was not saved.");
+    const second = await store.saveBuddy({ ...store.snapshot().buddies[0], id: undefined, screenName: "friend-two", displayName: "Friend Two" });
+    const other = second.buddies.find((item) => item.screenName === "friend-two");
+    if (!other) throw new Error("Second buddy was not saved.");
+    const room = await store.newBuddyChat([buddy.id, other.id]);
+    expect(room).toMatchObject({ kind: "buddy-chat", participantIds: [buddy.id, other.id] });
+    const userMessageId = "group-user" as MessageId;
+    const replyMessageId = "group-reply" as MessageId;
+    await store.addMessage(room.id, { id: userMessageId, role: "user", content: "Hello room", createdAt: "2026-01-01T00:00:00.000Z", state: "complete" });
+    await store.completeAssistant(room.id, { id: replyMessageId, role: "assistant", buddyId: buddy.id, replyToMessageId: userMessageId, content: "Hello", createdAt: "2026-01-01T00:00:01.000Z", state: "complete" });
+    const restarted = new AppStore(directory);
+    await restarted.load();
+    expect(restarted.snapshot().conversations[0]).toMatchObject({ kind: "buddy-chat", participantIds: [buddy.id, other.id] });
+    expect(restarted.snapshot().conversations[0]?.messages[1]).toMatchObject({ id: replyMessageId, buddyId: buddy.id, replyToMessageId: userMessageId });
+  });
+
+  it("adds a buddy to an existing chat with a durable join notice", async () => {
+    const { store, directory } = await testStore();
+    const first = store.snapshot().buddies[0];
+    if (!first) throw new Error("Test buddy was not saved.");
+    const secondSnapshot = await store.saveBuddy({ ...first, id: undefined, screenName: "second", displayName: "Second" });
+    const second = secondSnapshot.buddies.find((buddy) => buddy.screenName === "second");
+    const thirdSnapshot = await store.saveBuddy({ ...first, id: undefined, screenName: "third", displayName: "Third" });
+    const third = thirdSnapshot.buddies.find((buddy) => buddy.screenName === "third");
+    if (!second || !third) throw new Error("Test buddies were not saved.");
+    const room = await store.newBuddyChat([first.id, second.id]);
+
+    await store.addBuddyToChat(room.id, third.id);
+    const restarted = new AppStore(directory);
+    await restarted.load();
+
+    expect(restarted.conversation(room.id)).toMatchObject({
+      kind: "buddy-chat",
+      participantIds: [first.id, second.id, third.id],
+      messages: [{ role: "assistant", content: "Third joined the Buddy Chat.", state: "complete" }],
+    });
+  });
+
+  it("rejects duplicate screen names and a fifth Buddy Chat participant", async () => {
+    const { store } = await testStore();
+    const first = store.snapshot().buddies[0];
+    if (!first) throw new Error("Test buddy was not saved.");
+    await expect(store.saveBuddy({ ...first, id: undefined, displayName: "Duplicate" })).rejects.toThrow("unique screen name");
+    const extras = [];
+    for (const suffix of ["two", "three", "four", "five"]) {
+      const snapshot = await store.saveBuddy({ ...first, id: undefined, screenName: suffix, displayName: suffix });
+      const saved = snapshot.buddies.find((buddy) => buddy.screenName === suffix);
+      if (!saved) throw new Error("Test buddy was not saved.");
+      extras.push(saved);
+    }
+    const room = await store.newBuddyChat([first.id, extras[0]!.id, extras[1]!.id, extras[2]!.id]);
+    await expect(store.addBuddyToChat(room.id, extras[3]!.id)).rejects.toThrow("no more than four");
   });
 
   it("never uses a newly saved key with the old endpoint after a provider write fails", async () => {

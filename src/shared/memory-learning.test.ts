@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { UserProfile } from "./types";
 import { buildMemoryExtractionInstructions, parseMemoryCandidateText, shouldConsiderMemory } from "./memory-learning";
 
-const profile: UserProfile = { screenName: "retrofan", displayName: "Alex", pronouns: "", location: "", interests: "", aboutMe: "", status: "available" };
+const profile: UserProfile = { screenName: "retrofan", displayName: "Alex", pronouns: "", location: "", interests: "", aboutMe: "", status: "available", showMemoryUpdates: false };
 
 describe("automatic memory learning", () => {
   it("considers messages that may reveal something about the person", () => {
@@ -11,19 +11,20 @@ describe("automatic memory learning", () => {
     expect(shouldConsiderMemory("I was nine years old when I first played it.")).toBe(true);
     expect(shouldConsiderMemory("I've been restoring an old IBM computer.")).toBe(true);
     expect(shouldConsiderMemory("My brother introduced me to the series.")).toBe(true);
-    expect(shouldConsiderMemory("hello")).toBe(false);
-    expect(shouldConsiderMemory("Can you explain this function?")).toBe(false);
-    expect(shouldConsiderMemory("Can you help me with this?")).toBe(false);
-    expect(shouldConsiderMemory("I'm tired today.")).toBe(false);
+    expect(shouldConsiderMemory("hello")).toBe(true);
+    expect(shouldConsiderMemory("Can you explain this function?")).toBe(true);
+    expect(shouldConsiderMemory("   ")).toBe(false);
   });
 
   it("gives the memory pass the person's exact identity", () => {
-    const instructions = buildMemoryExtractionInstructions(profile, "My favorite computer is an Amiga.");
+    const instructions = buildMemoryExtractionInstructions(profile, "My favorite computer is an Amiga.", [{ id: "saved", text: "Alex restores old computers.", pinned: true }]);
     expect(instructions).toContain("friendship with Alex");
     expect(instructions).toContain("Refer to the person as Alex");
     expect(instructions).toContain("same language as this newest user message");
     expect(instructions).toContain("Put each concise, complete memory sentence on its own line");
     expect(instructions).toContain("Every memory sentence must begin with Alex or Alex's");
+    expect(instructions).toContain("CURRENT MEMORY NOTEBOOK");
+    expect(instructions).toContain("pinned");
   });
 
   it("parses tagged or plain memory output and ignores an empty result", () => {

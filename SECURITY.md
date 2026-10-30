@@ -2,7 +2,7 @@
 
 ## Reporting a problem
 
-AIIM uses [GitHub private vulnerability reporting](https://github.com/nikira-studio/AIIM/security/advisories/new) when the repository setting is enabled. Enable it before public release. Do not include API keys, subscription tokens, private chat history, or personal profile details. Include the AIIM version, Windows version, provider type, steps to reproduce, and the exact error with secrets removed.
+Report security problems through [GitHub private vulnerability reporting](https://github.com/nikira-studio/AIIM/security/advisories/new) when it is available. If private reporting is unavailable, open an issue that asks for a private contact method. Do not put API keys, subscription tokens, private chat history, or personal profile details in a public issue. Include the AIIM version, Windows version, provider type, steps to reproduce, and the exact error with secrets removed in the private report.
 
 ## Local protections
 

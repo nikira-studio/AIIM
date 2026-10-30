@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { safeStorage } from "electron";
-import type { AppSnapshot, Buddy, BuddyId, BuddyInput, ChatMessage, CheckInFrequency, Conversation, ConversationId, MemoryId, ProfileStatus, ProviderConfig, ProviderId, ProviderInput, ProviderKind, UserProfileInput } from "../shared/types";
+import type { AppSnapshot, Buddy, BuddyId, BuddyInput, BuddyMemoryInput, BuddyToolGrant, ChatMessage, CheckInFrequency, Conversation, ConversationId, MemoryId, MemoryMode, MessageId, McpConnection, McpConnectionId, McpConnectionInput, McpToolDefinition, ProfileStatus, ProviderConfig, ProviderId, ProviderInput, ProviderKind, UserProfileInput } from "../shared/types";
 import { nextCheckInDate } from "../shared/check-ins";
 import { buddyPresence } from "../shared/presence";
 import { parseStoredSnapshot } from "./validation";
@@ -11,10 +11,13 @@ interface StoredDocument { version: 1; snapshot: AppSnapshot; }
 interface CredentialBinding { kind: ProviderKind; baseUrl: string; }
 interface StoredCredential extends CredentialBinding { value: string; }
 type SecretMap = Record<string, StoredCredential>;
+interface StoredMcpCredential { value: string; transport: McpConnection["transport"]; target: string; }
+type McpSecretMap = Record<string, StoredMcpCredential>;
 
 export class AppStore {
   private snapshotValue: AppSnapshot = emptySnapshot();
   private secrets: SecretMap = {};
+  private mcpSecrets: McpSecretMap = {};
   private persistQueue: Promise<void> = Promise.resolve();
   private startupNoticeValue: string | undefined;
   constructor(private readonly directory: string) {}
@@ -23,7 +26,9 @@ export class AppStore {
     await fs.mkdir(this.directory, { recursive: true });
     this.snapshotValue = await this.readSnapshot();
     this.secrets = await this.readSecrets();
+    this.mcpSecrets = await this.readMcpSecrets();
     syncKeyFlags(this.snapshotValue, this.secrets);
+    syncMcpKeyFlags(this.snapshotValue, this.mcpSecrets);
   }
 
   snapshot(): AppSnapshot { return structuredClone(this.snapshotValue); }
@@ -44,10 +49,16 @@ export class AppStore {
         delete nextSecrets[id];
       }
     }
+    nextSnapshot.mcpConnections = nextSnapshot.mcpConnections.map((connection) => ({ ...connection, enabled: false, state: "disabled", lastError: undefined }));
+    nextSnapshot.buddyToolGrants = [];
+    nextSnapshot.capabilityActivity = [];
     syncKeyFlags(nextSnapshot, nextSecrets);
+    syncMcpKeyFlags(nextSnapshot, {});
     if (!sameSecrets(this.secrets, nextSecrets)) await this.writeSecrets(nextSecrets);
     await this.persist(nextSnapshot);
     this.secrets = nextSecrets;
+    this.mcpSecrets = {};
+    await this.writeMcpSecrets({});
     this.snapshotValue = nextSnapshot;
     return this.snapshot();
   }
@@ -99,13 +110,112 @@ export class AppStore {
     return provider ? credentialValue(this.secrets[id], provider) : undefined;
   }
 
+  mcpBearerToken(id: McpConnectionId): string | undefined {
+    const connection = this.snapshotValue.mcpConnections.find((item) => item.id === id);
+    const credential = this.mcpSecrets[id];
+    return connection && credential && credential.transport === connection.transport && credential.target === mcpCredentialTarget(connection) ? credential.value : undefined;
+  }
+
+  async saveMcpConnection(input: McpConnectionInput): Promise<AppSnapshot> {
+    const id = input.id ?? (randomUUID() as McpConnectionId);
+    const current = this.snapshotValue.mcpConnections.find((connection) => connection.id === id);
+    if (this.snapshotValue.mcpConnections.some((connection) => connection.id !== id && connection.name.localeCompare(input.name, undefined, { sensitivity: "accent" }) === 0)) throw new Error("Each connected service needs a unique name.");
+    const connection: McpConnection = {
+      id, name: input.name, transport: input.transport,
+      ...(input.endpoint ? { endpoint: input.endpoint } : {}),
+      ...(input.command ? { command: input.command } : {}),
+      ...(input.args?.length ? { args: input.args } : {}),
+      enabled: false, hasBearerToken: false, state: "disabled", tools: current?.tools ?? [], updatedAt: new Date().toISOString(),
+    };
+    const nextSecrets = { ...this.mcpSecrets };
+    if (!current || mcpCredentialTarget(current) !== mcpCredentialTarget(connection) || current.transport !== connection.transport) delete nextSecrets[id];
+    if (input.bearerToken) nextSecrets[id] = { value: input.bearerToken, transport: connection.transport, target: mcpCredentialTarget(connection) };
+    const nextSnapshot = structuredClone(this.snapshotValue);
+    nextSnapshot.mcpConnections = current ? nextSnapshot.mcpConnections.map((item) => item.id === id ? connection : item) : [...nextSnapshot.mcpConnections, connection];
+    nextSnapshot.buddyToolGrants = nextSnapshot.buddyToolGrants.filter((grant) => grant.connectionId !== id);
+    syncMcpKeyFlags(nextSnapshot, nextSecrets);
+    if (!sameMcpSecrets(this.mcpSecrets, nextSecrets)) await this.writeMcpSecrets(nextSecrets);
+    await this.persist(nextSnapshot);
+    this.mcpSecrets = nextSecrets;
+    this.snapshotValue = nextSnapshot;
+    return this.snapshot();
+  }
+
+  async removeMcpConnection(id: McpConnectionId): Promise<AppSnapshot> {
+    const nextSecrets = { ...this.mcpSecrets };
+    delete nextSecrets[id];
+    const nextSnapshot = structuredClone(this.snapshotValue);
+    nextSnapshot.mcpConnections = nextSnapshot.mcpConnections.filter((connection) => connection.id !== id);
+    nextSnapshot.buddyToolGrants = nextSnapshot.buddyToolGrants.filter((grant) => grant.connectionId !== id);
+    nextSnapshot.capabilityActivity = nextSnapshot.capabilityActivity.filter((entry) => entry.connectionId !== id);
+    if (!sameMcpSecrets(this.mcpSecrets, nextSecrets)) await this.writeMcpSecrets(nextSecrets);
+    await this.persist(nextSnapshot);
+    this.mcpSecrets = nextSecrets;
+    this.snapshotValue = nextSnapshot;
+    return this.snapshot();
+  }
+
+  async updateMcpConnectionRuntime(id: McpConnectionId, input: { enabled?: boolean; state: McpConnection["state"]; tools?: McpToolDefinition[]; error?: string }): Promise<AppSnapshot> {
+    const connection = this.mcpConnection(id);
+    connection.enabled = input.enabled ?? connection.enabled;
+    connection.state = input.state;
+    connection.tools = input.tools ?? connection.tools;
+    connection.updatedAt = new Date().toISOString();
+    if (input.error) connection.lastError = input.error.slice(0, 500); else delete connection.lastError;
+    this.snapshotValue.buddyToolGrants = this.snapshotValue.buddyToolGrants.filter((grant) => {
+      if (grant.connectionId !== id) return true;
+      const tool = connection.tools.find((item) => item.name === grant.toolName);
+      return tool?.fingerprint === grant.reviewedFingerprint;
+    });
+    await this.persist();
+    return this.snapshot();
+  }
+
+  async setBuddyToolGrant(buddyId: BuddyId, connectionId: McpConnectionId, toolName: string, granted: boolean): Promise<AppSnapshot> {
+    const connection = this.mcpConnection(connectionId);
+    const tool = connection.tools.find((item) => item.name === toolName);
+    if (!tool) throw new Error("That tool is no longer available.");
+    this.buddy(buddyId);
+    this.snapshotValue.buddyToolGrants = this.snapshotValue.buddyToolGrants.filter((grant) => !(grant.buddyId === buddyId && grant.connectionId === connectionId && grant.toolName === toolName));
+    if (granted) this.snapshotValue.buddyToolGrants.push({ buddyId, connectionId, toolName, reviewedFingerprint: tool.fingerprint, grantedAt: new Date().toISOString(), executionMode: "ask" });
+    await this.persist();
+    return this.snapshot();
+  }
+
+  async trustBuddyToolGrant(buddyId: BuddyId, connectionId: McpConnectionId, toolName: string, fingerprint: string): Promise<void> {
+    const grant = this.snapshotValue.buddyToolGrants.find((item) => item.buddyId === buddyId && item.connectionId === connectionId && item.toolName === toolName && item.reviewedFingerprint === fingerprint);
+    if (!grant) throw new Error("That capability permission has changed.");
+    grant.executionMode = "trusted";
+    await this.persist();
+  }
+
+  usableMcpTools(buddyId: BuddyId): Array<{ connection: McpConnection; tool: McpToolDefinition; grant: BuddyToolGrant }> {
+    return this.snapshotValue.buddyToolGrants.flatMap((grant) => {
+      if (grant.buddyId !== buddyId) return [];
+      const connection = this.snapshotValue.mcpConnections.find((item) => item.id === grant.connectionId);
+      const tool = connection?.tools.find((item) => item.name === grant.toolName && item.fingerprint === grant.reviewedFingerprint);
+      return connection?.enabled && connection.state === "ready" && tool ? [{ connection, tool, grant }] : [];
+    });
+  }
+
+  async recordCapabilityActivity(input: { buddyId: BuddyId; connectionId: McpConnectionId; toolName: string; decision: "allowed" | "denied" | "failed" | "completed" }): Promise<void> {
+    this.snapshotValue.capabilityActivity.unshift({ id: randomUUID(), createdAt: new Date().toISOString(), ...input });
+    this.snapshotValue.capabilityActivity = this.snapshotValue.capabilityActivity.slice(0, 100);
+    await this.persist();
+  }
+
+  async clearCapabilityActivity(): Promise<AppSnapshot> { this.snapshotValue.capabilityActivity = []; await this.persist(); return this.snapshot(); }
+
+  mcpConnection(id: McpConnectionId): McpConnection { const connection = this.snapshotValue.mcpConnections.find((item) => item.id === id); if (!connection) throw new Error("Connected service not found."); return connection; }
+
   async saveBuddy(input: BuddyInput): Promise<AppSnapshot> {
     if (!this.snapshotValue.providers.some((provider) => provider.id === input.providerId)) throw new Error("That provider no longer exists.");
     const id = input.id ?? (randomUUID() as BuddyId);
+    if (this.snapshotValue.buddies.some((buddy) => buddy.id !== id && buddy.screenName.toLocaleLowerCase() === input.screenName.toLocaleLowerCase())) throw new Error("Each buddy needs a unique screen name.");
     const existing = this.snapshotValue.buddies.find((buddy) => buddy.id === id);
     const frequencyChanged = existing?.checkInFrequency !== input.checkInFrequency;
     const nextCheckInAt = input.checkInFrequency === "off" ? undefined : frequencyChanged || !existing?.nextCheckInAt ? nextCheckInDate(input.checkInFrequency).toISOString() : existing.nextCheckInAt;
-    const buddy: Buddy = { ...input, id, status: existing?.status ?? "available", memories: existing?.memories ?? [], ...(nextCheckInAt ? { nextCheckInAt } : {}), ...(existing?.activeUntil ? { activeUntil: existing.activeUntil } : {}) };
+    const buddy: Buddy = { ...input, id, status: existing?.status ?? "available", memories: existing?.memories ?? [], memoryMode: existing?.memoryMode ?? "normal", memoryStatus: existing?.memoryStatus ?? { lastCheckedUserMessageCount: 0 }, ...(nextCheckInAt ? { nextCheckInAt } : {}), ...(existing?.activeUntil ? { activeUntil: existing.activeUntil } : {}) };
     this.snapshotValue.buddies = existing
       ? this.snapshotValue.buddies.map((item) => item.id === id ? buddy : item)
       : [...this.snapshotValue.buddies, buddy];
@@ -115,7 +225,9 @@ export class AppStore {
 
   async removeBuddy(id: BuddyId): Promise<AppSnapshot> {
     this.snapshotValue.buddies = this.snapshotValue.buddies.filter((buddy) => buddy.id !== id);
-    this.snapshotValue.conversations = this.snapshotValue.conversations.filter((conversation) => conversation.buddyId !== id);
+    this.snapshotValue.buddyToolGrants = this.snapshotValue.buddyToolGrants.filter((grant) => grant.buddyId !== id);
+    this.snapshotValue.capabilityActivity = this.snapshotValue.capabilityActivity.filter((entry) => entry.buddyId !== id);
+    this.snapshotValue.conversations = this.snapshotValue.conversations.filter((conversation) => conversation.kind === "direct" ? conversation.buddyId !== id : !conversation.participantIds.includes(id));
     await this.persist();
     return this.snapshot();
   }
@@ -124,10 +236,37 @@ export class AppStore {
     const buddy = this.snapshotValue.buddies.find((item) => item.id === buddyId);
     if (!buddy) throw new Error("That buddy no longer exists.");
     const now = new Date().toISOString();
-    const conversation: Conversation = { id: randomUUID() as ConversationId, buddyId, title: `Chat with ${buddy.displayName}`, createdAt: now, updatedAt: now, messages: [] };
+    const conversation: Conversation = { id: randomUUID() as ConversationId, kind: "direct", buddyId, title: `Chat with ${buddy.displayName}`, createdAt: now, updatedAt: now, messages: [] };
     this.snapshotValue.conversations.unshift(conversation);
     await this.persist();
     return structuredClone(conversation);
+  }
+
+  async newBuddyChat(participantIds: BuddyId[]): Promise<Conversation> {
+    const unique = [...new Set(participantIds)];
+    if (unique.length < 2 || unique.length > 4) throw new Error("A Buddy Chat needs two to four AI buddies.");
+    if (unique.some((id) => !this.snapshotValue.buddies.some((buddy) => buddy.id === id))) throw new Error("One of those buddies no longer exists.");
+    const now = new Date().toISOString();
+    const names = unique.map((id) => this.buddy(id).displayName);
+    const conversation: Conversation = { id: randomUUID() as ConversationId, kind: "buddy-chat", participantIds: unique, title: `Buddy Chat: ${names.join(", ")}`, createdAt: now, updatedAt: now, messages: [] };
+    this.snapshotValue.conversations.unshift(conversation);
+    await this.persist();
+    return structuredClone(conversation);
+  }
+
+  async addBuddyToChat(conversationId: ConversationId, buddyId: BuddyId): Promise<AppSnapshot> {
+    const conversation = this.conversation(conversationId);
+    if (conversation.kind !== "buddy-chat") throw new Error("This is not a Buddy Chat.");
+    if (conversation.participantIds.includes(buddyId)) return this.snapshot();
+    if (conversation.participantIds.length >= 4) throw new Error("A Buddy Chat can have no more than four AI buddies.");
+    const buddy = this.buddy(buddyId);
+    conversation.participantIds.push(buddyId);
+    const now = new Date().toISOString();
+    conversation.messages.push({ id: randomUUID() as MessageId, role: "assistant", content: `${buddy.displayName} joined the Buddy Chat.`, createdAt: now, state: "complete" });
+    conversation.updatedAt = now;
+    conversation.title = `Buddy Chat: ${conversation.participantIds.map((id) => this.buddy(id).displayName).join(", ")}`;
+    await this.persist();
+    return this.snapshot();
   }
 
   conversation(id: ConversationId): Conversation {
@@ -137,7 +276,7 @@ export class AppStore {
   }
 
   latestConversation(buddyId: BuddyId): Conversation | undefined {
-    return this.snapshotValue.conversations.find((conversation) => conversation.buddyId === buddyId);
+    return this.snapshotValue.conversations.find((conversation) => conversation.kind === "direct" && conversation.buddyId === buddyId);
   }
 
   buddy(id: BuddyId): Buddy {
@@ -184,10 +323,10 @@ export class AppStore {
 
   async clearConversation(id: ConversationId): Promise<AppSnapshot> {
     const conversation = this.conversation(id);
-    const buddy = this.buddy(conversation.buddyId);
     const now = new Date().toISOString();
     conversation.messages = [];
-    conversation.title = `Chat with ${buddy.displayName}`;
+    delete conversation.summary;
+    if (conversation.kind === "direct") conversation.title = `Chat with ${this.buddy(conversation.buddyId).displayName}`;
     conversation.updatedAt = now;
     await this.persist();
     return this.snapshot();
@@ -199,22 +338,51 @@ export class AppStore {
     return this.snapshot();
   }
 
-  async saveBuddyMemories(id: BuddyId, entries: string[]): Promise<AppSnapshot> {
+  async saveBuddyMemories(id: BuddyId, memoryMode: MemoryMode, entries: BuddyMemoryInput[]): Promise<AppSnapshot> {
     const buddy = this.buddy(id);
     const now = new Date().toISOString();
-    const unique = [...new Set(entries.map((entry) => entry.trim()).filter(Boolean))].slice(-30);
-    buddy.memories = unique.map((text) => {
-      const existing = buddy.memories.find((memory) => memory.text.toLowerCase() === text.toLowerCase());
-      return existing ?? { id: randomUUID() as MemoryId, text: text.slice(0, 500), createdAt: now };
+    const seen = new Set<string>();
+    buddy.memoryMode = memoryMode;
+    buddy.memories = entries.map((entry) => ({ ...entry, text: entry.text.trim().slice(0, 500) })).filter((entry) => entry.text && !seen.has(entry.text.toLowerCase()) && Boolean(seen.add(entry.text.toLowerCase()))).slice(-80).map((entry) => {
+      const existing = entry.id ? buddy.memories.find((memory) => memory.id === entry.id) : buddy.memories.find((memory) => memory.text.toLowerCase() === entry.text.toLowerCase());
+      return existing ? { ...existing, text: entry.text, pinned: entry.pinned } : { id: randomUUID() as MemoryId, text: entry.text, pinned: entry.pinned, createdAt: now };
     });
     await this.persist();
     return this.snapshot();
   }
 
-  async addMemories(id: BuddyId, entries: string[]): Promise<void> {
+  async applyMemoryEntries(id: BuddyId, entries: string[]): Promise<boolean> {
     const buddy = this.buddy(id);
-    await this.saveBuddyMemories(id, [...buddy.memories.map((memory) => memory.text), ...entries]);
+    if (buddy.memoryMode === "off") return false;
+    const now = new Date().toISOString();
+    const pinnedBudget = memoryBudget(buddy.memoryMode);
+    if (estimateMemoryTokens(buddy.memories.filter((memory) => memory.pinned).map((memory) => memory.text)) >= pinnedBudget) return false;
+    let changed = false;
+    for (const text of entries) {
+      const existing = buddy.memories.find((memory) => memory.text.toLocaleLowerCase() === text.toLocaleLowerCase());
+      if (!existing) { buddy.memories.push({ id: randomUUID() as MemoryId, text: text.slice(0, 500), pinned: false, createdAt: now }); changed = true; }
+    }
+    if (changed) buddy.memoryStatus = { ...buddy.memoryStatus, lastUpdatedAt: now, lastError: undefined };
+    await this.persist();
+    return changed;
   }
+
+  async addMemories(id: BuddyId, entries: string[]): Promise<void> { await this.applyMemoryEntries(id, entries); }
+
+  async recordMemoryCheck(id: BuddyId, input: { userMessageCount: number; error?: string }): Promise<void> {
+    const buddy = this.buddy(id);
+    buddy.memoryStatus = { ...buddy.memoryStatus, lastCheckedAt: new Date().toISOString(), lastCheckedUserMessageCount: input.userMessageCount, ...(input.error ? { lastError: input.error.slice(0, 300) } : { lastError: undefined }) };
+    await this.persist();
+  }
+
+  async removeMessage(conversationId: ConversationId, messageId: MessageId): Promise<void> {
+    const conversation = this.conversation(conversationId);
+    conversation.messages = conversation.messages.filter((message) => message.id !== messageId);
+    conversation.updatedAt = conversation.messages.at(-1)?.createdAt ?? conversation.createdAt;
+    await this.persist();
+  }
+
+  async saveConversationSummary(id: ConversationId, summary: Conversation["summary"]): Promise<void> { const conversation = this.conversation(id); if (summary) conversation.summary = summary; await this.persist(); }
 
   async markBuddyActive(id: BuddyId, durationMs = 10 * 60_000): Promise<void> {
     this.buddy(id).activeUntil = new Date(Date.now() + durationMs).toISOString();
@@ -296,6 +464,18 @@ export class AppStore {
     }
   }
 
+  private async readMcpSecrets(): Promise<McpSecretMap> {
+    try {
+      const encrypted = await fs.readFile(path.join(this.directory, "mcp-credentials.bin"));
+      if (!safeStorage.isEncryptionAvailable()) return {};
+      const raw: unknown = JSON.parse(safeStorage.decryptString(encrypted));
+      if (!isRecord(raw)) return {};
+      const output: McpSecretMap = {};
+      for (const [id, value] of Object.entries(raw)) if (isRecord(value) && typeof value.value === "string" && (value.transport === "stdio" || value.transport === "streamable-http") && typeof value.target === "string") output[id] = { value: value.value, transport: value.transport, target: value.target };
+      return output;
+    } catch { return {}; }
+  }
+
   private async persist(snapshot = this.snapshotValue): Promise<void> {
     const target = path.join(this.directory, "chats.json");
     const backup = path.join(this.directory, "chats.backup.json");
@@ -325,6 +505,10 @@ export class AppStore {
   private async writeSecrets(secrets: SecretMap): Promise<void> {
     if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows credential encryption is unavailable.");
     await fs.writeFile(path.join(this.directory, "credentials.bin"), safeStorage.encryptString(JSON.stringify(secrets)));
+  }
+  private async writeMcpSecrets(secrets: McpSecretMap): Promise<void> {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows credential encryption is unavailable.");
+    await fs.writeFile(path.join(this.directory, "mcp-credentials.bin"), safeStorage.encryptString(JSON.stringify(secrets)));
   }
 }
 
@@ -356,6 +540,17 @@ function syncKeyFlags(snapshot: AppSnapshot, secrets: SecretMap): void {
   snapshot.providers = snapshot.providers.map((provider) => ({ ...provider, hasApiKey: Boolean(credentialValue(secrets[provider.id], provider)) }));
 }
 
+function mcpCredentialTarget(connection: Pick<McpConnection, "transport" | "endpoint" | "command">): string { return connection.transport === "streamable-http" ? connection.endpoint ?? "" : connection.command ?? ""; }
+
+function sameMcpSecrets(left: McpSecretMap, right: McpSecretMap): boolean {
+  const entries = Object.entries(left);
+  return entries.length === Object.keys(right).length && entries.every(([id, value]) => right[id]?.value === value.value && right[id]?.transport === value.transport && right[id]?.target === value.target);
+}
+
+function syncMcpKeyFlags(snapshot: AppSnapshot, secrets: McpSecretMap): void {
+  snapshot.mcpConnections = snapshot.mcpConnections.map((connection) => ({ ...connection, hasBearerToken: Boolean(secrets[connection.id] && secrets[connection.id].transport === connection.transport && secrets[connection.id].target === mcpCredentialTarget(connection)) }));
+}
+
 function parseStoredSecrets(value: unknown): { secrets: SecretMap; legacyCredentialsDiscarded: boolean } {
   if (!isRecord(value)) return { secrets: {}, legacyCredentialsDiscarded: false };
   let legacyCredentialsDiscarded = false;
@@ -373,8 +568,11 @@ function isProviderKind(value: unknown): value is ProviderKind {
 }
 
 function emptySnapshot(): AppSnapshot {
-  return { providers: [], buddies: [], conversations: [], profile: { screenName: "me", displayName: "Me", pronouns: "", location: "", interests: "", aboutMe: "", status: "available" } };
+  return { providers: [], buddies: [], conversations: [], mcpConnections: [], buddyToolGrants: [], capabilityActivity: [], profile: { screenName: "me", displayName: "Me", pronouns: "", location: "", interests: "", aboutMe: "", status: "available", showMemoryUpdates: false } };
 }
+
+function memoryBudget(mode: MemoryMode): number { return mode === "detailed" ? 3_000 : mode === "normal" ? 1_500 : 0; }
+function estimateMemoryTokens(entries: string[]): number { return Math.ceil(entries.join("\n").length / 4); }
 
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";

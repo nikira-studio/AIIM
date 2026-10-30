@@ -14,6 +14,12 @@ import type {
   ConversationId,
   MemoryId,
   MessageId,
+  McpConnection,
+  McpConnectionId,
+  McpConnectionInput,
+  McpToolDefinition,
+  BuddyToolGrant,
+  CapabilityActivity,
   PresencePattern,
   ProviderConfig,
   ProviderId,
@@ -108,6 +114,7 @@ export function parseBuddyInput(value: unknown, options: SnapshotParseOptions = 
     modelId: requiredString(value.modelId, "Model"),
     reasoningEffort: parseReasoningEffort(value.reasoningEffort),
     systemPrompt: typeof value.systemPrompt === "string" ? value.systemPrompt.trim() : "",
+    world: parseBuddyWorld(value.world, value.era),
     group: typeof value.group === "string" && value.group.trim() ? value.group.trim() : "AI Buddies",
     color: /^#[0-9a-f]{6}$/i.test(String(value.color)) ? String(value.color) : "#2046a0",
     statusMessage: optionalString(value.statusMessage) ?? "Available",
@@ -124,8 +131,34 @@ export function parseBuddyInput(value: unknown, options: SnapshotParseOptions = 
     fontColor: /^#[0-9a-f]{6}$/i.test(String(value.fontColor)) ? String(value.fontColor) : "#1b489a",
     userRole: optionalString(value.userRole) ?? "",
     relationshipNotes: optionalString(value.relationshipNotes) ?? "",
+    chatTopics: parseChatTopics(value.chatTopics),
+    participationStyle: parseParticipationStyle(value.participationStyle),
     checkInFrequency: parseCheckInFrequency(value.checkInFrequency),
   };
+}
+
+export function parseMcpConnectionInput(value: unknown): McpConnectionInput {
+  if (!isRecord(value)) throw new Error("Enter valid connected-service details.");
+  const transport = value.transport === "stdio" ? "stdio" : value.transport === "streamable-http" ? "streamable-http" : undefined;
+  if (!transport) throw new Error("Choose a valid connection type.");
+  const name = requiredString(value.name, "Service name");
+  const input = { ...(typeof value.id === "string" ? { id: value.id as McpConnectionId } : {}), name, transport } satisfies McpConnectionInput;
+  if (transport === "streamable-http") {
+    const endpoint = normalizeMcpEndpoint(requiredString(value.endpoint, "Service address"));
+    return { ...input, endpoint, ...(typeof value.bearerToken === "string" ? { bearerToken: value.bearerToken.trim() } : {}) };
+  }
+  const command = requiredString(value.command, "Program");
+  const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 32) : [];
+  return { ...input, command, args };
+}
+
+export function normalizeMcpEndpoint(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("Enter a valid service address."); }
+  const loopback = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback.has(url.hostname.toLowerCase()))) throw new Error("Connected web services must use HTTPS. Plain HTTP is allowed only on this computer.");
+  if (url.username || url.password || url.search || url.hash) throw new Error("The service address cannot include credentials, a query, or a fragment.");
+  return url.toString();
 }
 
 export function parseStoredSnapshot(value: unknown, options: SnapshotParseOptions = {}): AppSnapshot | undefined {
@@ -144,11 +177,17 @@ export function parseStoredSnapshot(value: unknown, options: SnapshotParseOption
 
     const conversations = value.conversations.map(parseStoredConversation);
     requireUniqueIds(conversations, "conversation");
-    if (conversations.some(({ buddyId }) => !buddyIds.has(buddyId))) {
+    if (conversations.some((conversation) => conversationParticipants(conversation).some((id) => !buddyIds.has(id)))) {
       throw new Error("A conversation refers to a buddy that does not exist.");
     }
 
-    return { providers, buddies, conversations, profile: parseStoredProfile(value.profile) };
+    const mcpConnections = Array.isArray(value.mcpConnections) ? value.mcpConnections.map(parseStoredMcpConnection) : [];
+    requireUniqueIds(mcpConnections, "connected service");
+    const connectionIds = new Set(mcpConnections.map((connection) => connection.id));
+    const buddyToolGrants = Array.isArray(value.buddyToolGrants) ? value.buddyToolGrants.map(parseStoredBuddyToolGrant) : [];
+    if (buddyToolGrants.some((grant) => !buddyIds.has(grant.buddyId) || !connectionIds.has(grant.connectionId))) throw new Error("A tool grant refers to a missing buddy or service.");
+    const capabilityActivity = Array.isArray(value.capabilityActivity) ? value.capabilityActivity.map(parseStoredCapabilityActivity) : [];
+    return { providers, buddies, conversations, profile: parseStoredProfile(value.profile), mcpConnections, buddyToolGrants, capabilityActivity };
   } catch {
     return undefined;
   }
@@ -188,6 +227,7 @@ function parseStoredBuddy(value: unknown, options: SnapshotParseOptions): Buddy 
     modelId: requiredString(value.modelId, "Buddy model"),
     reasoningEffort: parseReasoningEffort(value.reasoningEffort),
     systemPrompt: storedString(value.systemPrompt),
+    world: parseBuddyWorld(value.world, value.era),
     group: optionalPlainString(value.group) ?? "AI Buddies",
     color: parseColor(value.color, "#2046a0"),
     status: value.status === "away" ? "away" : "available",
@@ -205,7 +245,11 @@ function parseStoredBuddy(value: unknown, options: SnapshotParseOptions): Buddy 
     fontColor: parseColor(value.fontColor, "#1b489a"),
     userRole: storedString(value.userRole),
     relationshipNotes: storedString(value.relationshipNotes),
+    chatTopics: parseChatTopics(value.chatTopics).length ? parseChatTopics(value.chatTopics) : topicsFromInterests(storedString(value.profileInterests)),
+    participationStyle: parseParticipationStyle(value.participationStyle),
     memories,
+    memoryMode: value.memoryMode === "off" || value.memoryMode === "detailed" ? value.memoryMode : "normal",
+    memoryStatus: parseMemoryStatus(value.memoryStatus),
     checkInFrequency: parseCheckInFrequency(value.checkInFrequency),
     ...(nextCheckInAt ? { nextCheckInAt } : {}),
     ...(activeUntil ? { activeUntil } : {}),
@@ -218,6 +262,7 @@ function parseStoredMemory(value: unknown): BuddyMemory {
     id: storedId(value.id, "Memory ID") as MemoryId,
     text: requiredString(value.text, "Memory text"),
     createdAt: requiredDate(value.createdAt, "Memory creation time"),
+    pinned: value.pinned === true,
   };
 }
 
@@ -225,15 +270,80 @@ function parseStoredConversation(value: unknown): Conversation {
   if (!isRecord(value)) throw new Error("Invalid stored conversation.");
   const messages = requiredArray(value.messages, "Conversation messages").map(parseStoredMessage);
   requireUniqueIds(messages, "message");
-  return {
+  const summary = parseStoredSummary(value.summary, messages);
+  const base = {
     id: storedId(value.id, "Conversation ID") as ConversationId,
-    buddyId: storedId(value.buddyId, "Conversation buddy ID") as BuddyId,
     title: requiredString(value.title, "Conversation title"),
     createdAt: requiredDate(value.createdAt, "Conversation creation time"),
     updatedAt: requiredDate(value.updatedAt, "Conversation update time"),
     messages,
+    ...(summary ? { summary } : {}),
+  };
+  if (value.kind === "buddy-chat") {
+    const participantIds = requiredArray(value.participantIds, "Buddy Chat participants").map((id) => storedId(id, "Buddy Chat participant ID") as BuddyId);
+    if (new Set(participantIds).size !== participantIds.length) throw new Error("Buddy Chat participants must be unique.");
+    if (participantIds.length < 2) throw new Error("A Buddy Chat needs at least two participants.");
+    if (messages.some((message) => message.buddyId && !participantIds.includes(message.buddyId))) throw new Error("A Buddy Chat message names a buddy outside the chat.");
+    return { ...base, kind: "buddy-chat", participantIds };
+  }
+  return { ...base, kind: "direct", buddyId: storedId(value.buddyId, "Conversation buddy ID") as BuddyId };
+}
+
+function parseStoredMcpConnection(value: unknown): McpConnection {
+  if (!isRecord(value)) throw new Error("Invalid connected service.");
+  const id = storedId(value.id, "Connected service ID") as McpConnectionId;
+  const parsed = parseMcpConnectionInput({ id, name: value.name, transport: value.transport, endpoint: value.endpoint, command: value.command, args: value.args });
+  const tools = Array.isArray(value.tools) ? value.tools.map(parseStoredMcpTool) : [];
+  if (new Set(tools.map((tool) => tool.name)).size !== tools.length) throw new Error("Duplicate connected-service tool.");
+  return {
+    ...parsed,
+    id,
+    enabled: value.enabled === true,
+    hasBearerToken: value.hasBearerToken === true,
+    state: value.state === "ready" || value.state === "unavailable" || value.state === "needs-review" ? value.state : "disabled",
+    ...(typeof value.lastError === "string" && value.lastError.trim() ? { lastError: value.lastError.trim().slice(0, 500) } : {}),
+    tools,
+    updatedAt: parseOptionalDate(value.updatedAt, "Connected-service update time") ?? new Date(0).toISOString(),
   };
 }
+
+function parseStoredMcpTool(value: unknown): McpToolDefinition {
+  if (!isRecord(value) || typeof value.name !== "string" || !value.name || !isRecord(value.inputSchema) || typeof value.fingerprint !== "string" || !value.fingerprint) throw new Error("Invalid connected-service tool.");
+  return {
+    name: value.name,
+    ...(typeof value.title === "string" ? { title: value.title.slice(0, 400) } : {}),
+    ...(typeof value.description === "string" ? { description: value.description.slice(0, 4_000) } : {}),
+    inputSchema: value.inputSchema,
+    ...(isRecord(value.outputSchema) ? { outputSchema: value.outputSchema } : {}),
+    ...(isRecord(value.annotations) ? { annotations: value.annotations } : {}),
+    fingerprint: value.fingerprint.slice(0, 128),
+  };
+}
+
+function parseStoredBuddyToolGrant(value: unknown): BuddyToolGrant {
+  if (!isRecord(value)) throw new Error("Invalid tool grant.");
+  return {
+    buddyId: storedId(value.buddyId, "Granted buddy") as BuddyId,
+    connectionId: storedId(value.connectionId, "Granted service") as McpConnectionId,
+    toolName: requiredString(value.toolName, "Granted tool").slice(0, 400),
+    reviewedFingerprint: requiredString(value.reviewedFingerprint, "Granted tool fingerprint").slice(0, 128),
+    grantedAt: requiredDate(value.grantedAt, "Tool grant time"),
+    executionMode: value.executionMode === "trusted" ? "trusted" : "ask",
+  };
+}
+
+function parseStoredCapabilityActivity(value: unknown): CapabilityActivity {
+  if (!isRecord(value)) throw new Error("Invalid capability activity.");
+  const decision = value.decision === "allowed" || value.decision === "denied" || value.decision === "failed" || value.decision === "completed" ? value.decision : undefined;
+  if (!decision) throw new Error("Invalid capability activity.");
+  return { id: storedId(value.id, "Capability activity ID"), createdAt: requiredDate(value.createdAt, "Capability activity time"), buddyId: storedId(value.buddyId, "Capability buddy") as BuddyId, connectionId: storedId(value.connectionId, "Capability service") as McpConnectionId, toolName: requiredString(value.toolName, "Capability tool").slice(0, 400), decision };
+}
+
+function conversationParticipants(conversation: Conversation): BuddyId[] { return conversation.kind === "direct" ? [conversation.buddyId] : conversation.participantIds; }
+function parseChatTopics(value: unknown): string[] { return Array.isArray(value) ? value.filter((topic): topic is string => typeof topic === "string" && topic.trim().length > 0).map((topic) => topic.trim().slice(0, 100)).slice(0, 12) : []; }
+function parseParticipationStyle(value: unknown): Buddy["participationStyle"] { return value === "quiet" || value === "eager" ? value : "normal"; }
+function parseBuddyWorld(value: unknown, legacyEra: unknown): string { return optionalPlainString(value) ?? (legacyEra === "late-1990s" ? "Everyday life takes place in the late 1990s." : ""); }
+function topicsFromInterests(interests: string): string[] { return interests.split(/[^\p{L}\p{N}]+/u).map((topic) => topic.trim().toLocaleLowerCase()).filter((topic) => topic.length >= 3).slice(0, 12); }
 
 function parseStoredMessage(value: unknown): ChatMessage {
   if (!isRecord(value)) throw new Error("Invalid stored message.");
@@ -245,6 +355,8 @@ function parseStoredMessage(value: unknown): ChatMessage {
     content: storedString(value.content),
     createdAt: requiredDate(value.createdAt, "Message creation time"),
     state: value.state,
+    ...(typeof value.buddyId === "string" ? { buddyId: storedId(value.buddyId, "Message buddy ID") as BuddyId } : {}),
+    ...(typeof value.replyToMessageId === "string" ? { replyToMessageId: storedId(value.replyToMessageId, "Reply-to message ID") as MessageId } : {}),
   };
 }
 
@@ -260,6 +372,7 @@ function parseStoredProfile(value: unknown): UserProfile {
     interests: storedString(value.interests),
     aboutMe: storedString(value.aboutMe),
     status: value.status === "away" ? "away" : "available",
+    showMemoryUpdates: value.showMemoryUpdates === true,
   };
 }
 
@@ -273,7 +386,24 @@ export function parseUserProfileInput(value: unknown): UserProfileInput {
     location: optionalString(value.location) ?? "",
     interests: optionalString(value.interests) ?? "",
     aboutMe: optionalString(value.aboutMe) ?? "",
+    showMemoryUpdates: value.showMemoryUpdates === true,
   };
+}
+
+function parseMemoryStatus(value: unknown): Buddy["memoryStatus"] {
+  if (!isRecord(value)) return { lastCheckedUserMessageCount: 0 };
+  return {
+    ...(parseOptionalDate(value.lastCheckedAt, "Memory check time") ? { lastCheckedAt: parseOptionalDate(value.lastCheckedAt, "Memory check time") } : {}),
+    ...(parseOptionalDate(value.lastUpdatedAt, "Memory update time") ? { lastUpdatedAt: parseOptionalDate(value.lastUpdatedAt, "Memory update time") } : {}),
+    ...(typeof value.lastError === "string" && value.lastError.trim() ? { lastError: value.lastError.trim().slice(0, 300) } : {}),
+    lastCheckedUserMessageCount: typeof value.lastCheckedUserMessageCount === "number" && value.lastCheckedUserMessageCount >= 0 ? Math.floor(value.lastCheckedUserMessageCount) : 0,
+  };
+}
+
+function parseStoredSummary(value: unknown, messages: ChatMessage[]): Conversation["summary"] {
+  if (!isRecord(value) || typeof value.content !== "string" || !value.content.trim() || typeof value.throughMessageId !== "string" || !messages.some((message) => message.id === value.throughMessageId)) return undefined;
+  const updatedAt = parseOptionalDate(value.updatedAt, "Summary update time");
+  return updatedAt ? { content: value.content.trim().slice(0, 12_000), throughMessageId: value.throughMessageId as MessageId, updatedAt } : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { normalizeOllamaBaseUrl, parseBuddyInput, parseProviderInput, parseStoredSnapshot, parseUserProfileInput } from "./validation";
+import { normalizeMcpEndpoint, normalizeOllamaBaseUrl, parseBuddyInput, parseMcpConnectionInput, parseProviderInput, parseStoredSnapshot, parseUserProfileInput } from "./validation";
 
 describe("provider boundary", () => {
   it("requires a URL for custom providers", () => {
@@ -45,6 +45,19 @@ describe("provider boundary", () => {
     ],
   ])("rejects unsafe or ambiguous restored provider data", (providers) => {
     expect(parseStoredSnapshot(storedSnapshot(providers))).toBeUndefined();
+  });
+});
+
+describe("connected-service boundary", () => {
+  it("allows HTTPS and local loopback web services only", () => {
+    expect(normalizeMcpEndpoint("https://service.example/mcp")).toBe("https://service.example/mcp");
+    expect(normalizeMcpEndpoint("http://localhost:3000/mcp")).toBe("http://localhost:3000/mcp");
+    expect(() => normalizeMcpEndpoint("http://remote-service.example/mcp")).toThrow("HTTPS");
+    expect(() => normalizeMcpEndpoint("https://user:pass@service.example/mcp")).toThrow("credentials");
+  });
+
+  it("keeps a local program command separate from its arguments", () => {
+    expect(parseMcpConnectionInput({ name: "Example", transport: "stdio", command: "npx.cmd", args: ["-y", "example"] })).toEqual({ name: "Example", transport: "stdio", command: "npx.cmd", args: ["-y", "example"] });
   });
 });
 

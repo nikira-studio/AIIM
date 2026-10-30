@@ -10,6 +10,7 @@ const profile: UserProfile = {
   interests: "",
   aboutMe: "",
   status: "available",
+  showMemoryUpdates: false,
 };
 
 describe("user identity", () => {

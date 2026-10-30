@@ -4,11 +4,11 @@ AIIM imports versioned UTF-8 JSON files ending in `.json` or `.aiim-character`. 
 
 The machine-readable definition is [`aiim-character.schema.json`](./aiim-character.schema.json). The simplest way to create a file is to build a buddy in Preferences and click **Export**. Exported files never contain a provider, model, credential, chat history, or memory.
 
-Built-in packs use exactly this format in `src/templates/built-in-characters`. During development, adding another valid JSON file to that folder automatically adds it to the character picker.
+Built-in packs use exactly this format in `src/templates/built-in-characters`. During development, adding another valid JSON file to that folder automatically adds it to the character picker. Version 1 files remain supported; version 2 adds `world`, `chatTopics`, and `participationStyle`.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "friendly-ani",
   "displayName": "Ani",
   "screenName": "aniOnline",
@@ -22,6 +22,7 @@ Built-in packs use exactly this format in `src/templates/built-in-characters`. D
   "profileLocation": "Somewhere with decent coffee",
   "profileInterests": "music, old computers, people",
   "profileQuote": "Tell me the version you almost didn't say.",
+  "world": "",
   "presencePattern": "varied",
   "notificationSound": "soft",
   "fontFamily": "Verdana",
@@ -37,3 +38,5 @@ For an easy-to-edit two-file package, add `"avatarFile": "ani.png"` and keep the
 For a single portable file, add `"avatarDataUrl": "data:image/png;base64,..."`. AIIM accepts PNG, JPEG, WebP, and GIF images. Imported portraits are copied into AIIM's managed data folder, so the source files can be moved afterward.
 
 Character files must be smaller than 1 MB before decoding an embedded portrait. Portraits must be smaller than 10 MB.
+
+`avatarUrl` is reserved for AIIM's bundled character files and points to an image inside the app's `portraits/` directory. Use `avatarFile` or `avatarDataUrl` for a portable character file.

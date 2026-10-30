@@ -9,6 +9,18 @@ function provider(kind: ProviderConfig["kind"]): ProviderConfig {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("built-in model choices", () => {
+  it.each(["https://models.example/v1", "https://models.example/v1/"])("loads an OpenAI-compatible model list from %s with its bearer key", async (baseUrl) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "model-one" }, { id: "model-two" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const models = await listProviderModels({ ...provider("openai-compatible"), baseUrl }, "test-key");
+    expect(fetchMock).toHaveBeenCalledWith("https://models.example/v1/models", expect.objectContaining({ headers: { authorization: "Bearer test-key" } }));
+    expect(models.map(({ id }) => id)).toEqual(["model-one", "model-two"]);
+  });
+
+  it("explains the requested address when a compatible model list returns 404", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Not found", { status: 404 })));
+    await expect(listProviderModels({ ...provider("openai-compatible"), baseUrl: "https://models.example" }, "test-key")).rejects.toThrow("https://models.example/models");
+  });
   it("offers MiniMax reasoning models without a discovery request", async () => {
     const models = await listProviderModels(provider("minimax"));
     expect(models.map(({ id }) => id)).toContain("MiniMax-M3");

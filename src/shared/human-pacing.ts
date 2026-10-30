@@ -18,6 +18,11 @@ export function replyDelayMs(input: { userText: string; replyText: string; typin
   return Math.round(Math.min(maximum, Math.max(900, (reading + composing) * humanVariation)));
 }
 
+export function handoffReadDelayMs(messageText: string, variation = Math.random()): number {
+  const normalized = Math.min(1, Math.max(0, variation));
+  return Math.round(900 + Math.min(1_700, messageText.length * 5) + normalized * 400);
+}
+
 export async function waitForReplyTime(startedAt: number, targetMs: number, signal: AbortSignal): Promise<void> {
   const remaining = Math.max(0, targetMs - (Date.now() - startedAt));
   if (!remaining) return;
